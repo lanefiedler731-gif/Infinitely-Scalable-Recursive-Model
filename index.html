@@ -691,6 +691,7 @@
         <ul>
             <li><a href="#abstract">Abstract</a></li>
             <li><a href="#introduction">Introduction</a></li>
+            <li><a href="#algorithm">Algorithm</a></li>
             <li><a href="#architecture">Architecture</a></li>
             <li><a href="#results">Results</a></li>
             <li><a href="#benchmarks">Why No Benchmarks?</a></li>
@@ -772,6 +773,475 @@
                         ISRM inverts the priority. We treat the <em>trajectory</em> toward the fixed point as the product. Every intermediate step K produces a valid output. Training sees random truncations, teaching the network that "good enough now" matters as much as "perfect eventually." DEQ asks "what is the answer?" ISRM asks "how good can the answer get if I keep thinking?"
                     </p>
                 </div>
+            </div>
+        </section>
+        
+        <section id="algorithm">
+            <div class="container">
+                <h2>Complete Algorithm</h2>
+                
+                <p class="lead" style="font-size: 1.2rem; color: #888; margin-bottom: 2rem;">
+                    Understanding ISRM requires seeing how data flows through the system. Below we present the architecture as an interactive diagram, followed by deep explanations of each component.
+                </p>
+                
+                <!-- MAIN ARCHITECTURE SVG DIAGRAM -->
+                <div style="background: linear-gradient(135deg, #0d0d0d 0%, #1a1a1a 100%); border-radius: 16px; padding: 2rem; margin-bottom: 3rem; border: 1px solid #333;">
+                    <h3 style="text-align: center; margin-bottom: 1.5rem; color: #e8e4d9;">Data Flow Architecture</h3>
+                    
+                    <svg viewBox="0 0 900 600" style="width: 100%; max-width: 900px; margin: 0 auto; display: block;">
+                        <defs>
+                            <!-- Gradients -->
+                            <linearGradient id="inputGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+                                <stop offset="0%" style="stop-color:#4a6741"/>
+                                <stop offset="100%" style="stop-color:#3d5a35"/>
+                            </linearGradient>
+                            <linearGradient id="processGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+                                <stop offset="0%" style="stop-color:#2a3a4a"/>
+                                <stop offset="100%" style="stop-color:#1e2d3d"/>
+                            </linearGradient>
+                            <linearGradient id="loopGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+                                <stop offset="0%" style="stop-color:#4a3a2a"/>
+                                <stop offset="100%" style="stop-color:#3d2d1e"/>
+                            </linearGradient>
+                            <linearGradient id="outputGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+                                <stop offset="0%" style="stop-color:#5a4a3a"/>
+                                <stop offset="100%" style="stop-color:#4d3d2d"/>
+                            </linearGradient>
+                            
+                            <!-- Arrow marker -->
+                            <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+                                <polygon points="0 0, 10 3.5, 0 7" fill="#888"/>
+                            </marker>
+                            
+                            <!-- Glow filter -->
+                            <filter id="glow">
+                                <feGaussianBlur stdDeviation="2" result="coloredBlur"/>
+                                <feMerge>
+                                    <feMergeNode in="coloredBlur"/>
+                                    <feMergeNode in="SourceGraphic"/>
+                                </feMerge>
+                            </filter>
+                        </defs>
+                        
+                        <!-- Input Box -->
+                        <g class="diagram-node" style="cursor: pointer;">
+                            <rect x="50" y="30" width="160" height="70" rx="8" fill="url(#inputGrad)" stroke="#6b8f5e" stroke-width="2"/>
+                            <text x="130" y="58" text-anchor="middle" fill="#e8e4d9" font-size="14" font-weight="bold">Input Tokens</text>
+                            <text x="130" y="78" text-anchor="middle" fill="#aaa" font-size="12">[B, S] integers</text>
+                        </g>
+                        
+                        <!-- Arrow 1 -->
+                        <line x1="210" y1="65" x2="270" y2="65" stroke="#888" stroke-width="2" marker-end="url(#arrowhead)"/>
+                        
+                        <!-- Embedding Box -->
+                        <g class="diagram-node">
+                            <rect x="280" y="30" width="160" height="70" rx="8" fill="url(#processGrad)" stroke="#4a6a8a" stroke-width="2"/>
+                            <text x="360" y="55" text-anchor="middle" fill="#e8e4d9" font-size="14" font-weight="bold">embed_tokens</text>
+                            <text x="360" y="75" text-anchor="middle" fill="#aaa" font-size="11">Vocabulary Lookup</text>
+                        </g>
+                        
+                        <!-- Arrow with label -->
+                        <line x1="440" y1="65" x2="500" y2="65" stroke="#888" stroke-width="2" marker-end="url(#arrowhead)"/>
+                        <text x="470" y="55" text-anchor="middle" fill="#6b8" font-size="11" font-style="italic">x</text>
+                        
+                        <!-- X tensor box -->
+                        <g class="diagram-node">
+                            <rect x="510" y="30" width="140" height="70" rx="8" fill="#1a2a1a" stroke="#4a6741" stroke-width="2" stroke-dasharray="5,3"/>
+                            <text x="580" y="55" text-anchor="middle" fill="#7a9" font-size="13" font-weight="bold">x : [B, S, D]</text>
+                            <text x="580" y="75" text-anchor="middle" fill="#888" font-size="11">Token Embeddings</text>
+                        </g>
+                        
+                        <!-- Initial States -->
+                        <g class="diagram-node">
+                            <rect x="690" y="15" width="180" height="100" rx="8" fill="url(#processGrad)" stroke="#4a6a8a" stroke-width="2"/>
+                            <text x="780" y="40" text-anchor="middle" fill="#e8e4d9" font-size="13" font-weight="bold">Initialize States</text>
+                            <line x1="710" y1="50" x2="850" y2="50" stroke="#333" stroke-width="1"/>
+                            <text x="780" y="70" text-anchor="middle" fill="#7a9" font-size="12">y_0 = output_init</text>
+                            <text x="780" y="90" text-anchor="middle" fill="#a97" font-size="12">z_0 = latent_init</text>
+                        </g>
+                        
+                        <!-- Down arrow to loop -->
+                        <line x1="580" y1="100" x2="580" y2="140" stroke="#888" stroke-width="2" marker-end="url(#arrowhead)"/>
+                        <line x1="780" y1="115" x2="780" y2="170" stroke="#888" stroke-width="2"/>
+                        <line x1="780" y1="170" x2="680" y2="170" stroke="#888" stroke-width="2" marker-end="url(#arrowhead)"/>
+                        
+                        <!-- THE REFINEMENT LOOP - Main box -->
+                        <g class="diagram-node">
+                            <rect x="100" y="150" width="580" height="320" rx="12" fill="none" stroke="#c9a227" stroke-width="3" stroke-dasharray="8,4">
+                                <animate attributeName="stroke-dashoffset" from="0" to="24" dur="2s" repeatCount="indefinite"/>
+                            </rect>
+                            <rect x="280" y="135" width="220" height="30" rx="4" fill="#1a1a1a"/>
+                            <text x="390" y="156" text-anchor="middle" fill="#c9a227" font-size="14" font-weight="bold">REFINEMENT LOOP (K times)</text>
+                        </g>
+                        
+                        <!-- Step 1: Decay -->
+                        <g class="diagram-node">
+                            <rect x="120" y="180" width="250" height="60" rx="6" fill="url(#loopGrad)" stroke="#8a7a5a" stroke-width="1.5"/>
+                            <text x="245" y="200" text-anchor="middle" fill="#e8e4d9" font-size="12" font-weight="bold">1. Compute Decay</text>
+                            <text x="245" y="225" text-anchor="middle" fill="#c9a227" font-size="11" font-family="monospace">alpha = 0.15/(1+0.15k) * 0.97^k</text>
+                        </g>
+                        
+                        <!-- Step 2: Step Embedding -->
+                        <g class="diagram-node">
+                            <rect x="400" y="180" width="260" height="60" rx="6" fill="url(#loopGrad)" stroke="#8a7a5a" stroke-width="1.5"/>
+                            <text x="530" y="200" text-anchor="middle" fill="#e8e4d9" font-size="12" font-weight="bold">2. Step Embedding (SAME for all k!)</text>
+                            <text x="530" y="225" text-anchor="middle" fill="#7a9" font-size="11" font-family="monospace">s = step_proj(step_embed[0])</text>
+                        </g>
+                        
+                        <!-- Step 3: Output Refinement -->
+                        <g class="diagram-node">
+                            <rect x="120" y="260" width="540" height="80" rx="6" fill="url(#processGrad)" stroke="#4a8a6a" stroke-width="2"/>
+                            <text x="390" y="285" text-anchor="middle" fill="#e8e4d9" font-size="13" font-weight="bold">3. Output Refinement</text>
+                            <text x="390" y="310" text-anchor="middle" fill="#7c9" font-size="12" font-family="monospace">target = TinyNetwork(x + y, s)</text>
+                            <text x="390" y="330" text-anchor="middle" fill="#9d7" font-size="13" font-family="monospace" font-weight="bold">y = y + alpha * (target - y)</text>
+                        </g>
+                        
+                        <!-- Step 4: Latent Refinement -->
+                        <g class="diagram-node">
+                            <rect x="120" y="355" width="540" height="80" rx="6" fill="url(#processGrad)" stroke="#8a6a4a" stroke-width="2"/>
+                            <text x="390" y="378" text-anchor="middle" fill="#e8e4d9" font-size="13" font-weight="bold">4. Latent Refinement (x2 iterations)</text>
+                            <text x="390" y="403" text-anchor="middle" fill="#ca9" font-size="12" font-family="monospace">lat_target = TinyNetwork(x + y + z, s)</text>
+                            <text x="390" y="423" text-anchor="middle" fill="#da8" font-size="13" font-family="monospace" font-weight="bold">z = z + alpha * (lat_target - z)</text>
+                        </g>
+                        
+                        <!-- Loop back arrow -->
+                        <path d="M 660 320 Q 720 320 720 250 Q 720 180 660 180" fill="none" stroke="#c9a227" stroke-width="2" marker-end="url(#arrowhead)">
+                            <animate attributeName="stroke-opacity" values="0.3;1;0.3" dur="1.5s" repeatCount="indefinite"/>
+                        </path>
+                        <text x="745" y="250" text-anchor="middle" fill="#c9a227" font-size="12" font-style="italic">repeat K</text>
+                        
+                        <!-- Down arrow to output -->
+                        <line x1="390" y1="470" x2="390" y2="510" stroke="#888" stroke-width="2" marker-end="url(#arrowhead)"/>
+                        
+                        <!-- LM Head -->
+                        <g class="diagram-node">
+                            <rect x="290" y="520" width="200" height="60" rx="8" fill="url(#outputGrad)" stroke="#9a8a6a" stroke-width="2"/>
+                            <text x="390" y="545" text-anchor="middle" fill="#e8e4d9" font-size="14" font-weight="bold">lm_head(y)</text>
+                            <text x="390" y="565" text-anchor="middle" fill="#aaa" font-size="11">Project to Vocabulary</text>
+                        </g>
+                        
+                        <!-- Output -->
+                        <line x1="490" y1="550" x2="560" y2="550" stroke="#888" stroke-width="2" marker-end="url(#arrowhead)"/>
+                        <g class="diagram-node">
+                            <rect x="570" y="520" width="160" height="60" rx="8" fill="url(#inputGrad)" stroke="#6b8f5e" stroke-width="2"/>
+                            <text x="650" y="545" text-anchor="middle" fill="#e8e4d9" font-size="14" font-weight="bold">Logits</text>
+                            <text x="650" y="565" text-anchor="middle" fill="#aaa" font-size="11">[B, S, Vocab]</text>
+                        </g>
+                    </svg>
+                </div>
+                
+                <!-- DEEP DIVE: The Refinement Equation -->
+                <div style="background: #0d0d0d; border-radius: 16px; padding: 2rem; margin-bottom: 2rem; border-left: 4px solid #4a6741;">
+                    <h3 style="color: #7a9; margin-bottom: 1rem;">Deep Dive: The Refinement Equation</h3>
+                    
+                    <div style="background: #1a1a1a; padding: 1.5rem; border-radius: 8px; text-align: center; margin-bottom: 1.5rem;">
+                        <span style="font-size: 1.4rem; color: #e8e4d9; font-family: 'Georgia', serif;">
+                            y<sub>k</sub> = y<sub>k-1</sub> + alpha<sub>k</sub> * ( f(y<sub>k-1</sub>) - y<sub>k-1</sub> )
+                        </span>
+                    </div>
+                    
+                    <p style="color: #aaa; line-height: 1.8;">
+                        This equation is the heart of ISRM. Let us break it down:
+                    </p>
+                    
+                    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 1.5rem; margin-top: 1.5rem;">
+                        <div style="background: #1a2a1a; padding: 1.2rem; border-radius: 8px; border: 1px solid #3a5a3a;">
+                            <div style="color: #7a9; font-weight: bold; margin-bottom: 0.5rem;">f(y<sub>k-1</sub>) - y<sub>k-1</sub></div>
+                            <div style="color: #888; font-size: 0.9rem;">The <strong style="color:#aaa;">direction</strong> of improvement. The network suggests where to go, and we compute the delta from current position.</div>
+                        </div>
+                        
+                        <div style="background: #2a2a1a; padding: 1.2rem; border-radius: 8px; border: 1px solid #5a5a3a;">
+                            <div style="color: #c9a227; font-weight: bold; margin-bottom: 0.5rem;">alpha<sub>k</sub></div>
+                            <div style="color: #888; font-size: 0.9rem;">The <strong style="color:#aaa;">step size</strong>. Decays exponentially. Early steps take big strides; late steps take tiny adjustments. This forces convergence.</div>
+                        </div>
+                        
+                        <div style="background: #1a1a2a; padding: 1.2rem; border-radius: 8px; border: 1px solid #3a3a5a;">
+                            <div style="color: #8ac; font-weight: bold; margin-bottom: 0.5rem;">y<sub>k-1</sub> + ...</div>
+                            <div style="color: #888; font-size: 0.9rem;">We <strong style="color:#aaa;">add</strong> to the previous state, never replace it. This is a residual update, ensuring stability and smooth trajectories.</div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- WHY STATELESS? -->
+                <div style="background: #0d0d0d; border-radius: 16px; padding: 2rem; margin-bottom: 2rem; border-left: 4px solid #c9a227;">
+                    <h3 style="color: #c9a227; margin-bottom: 1rem;">Critical Design: Stateless Refinement</h3>
+                    
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 2rem;">
+                        <div>
+                            <h4 style="color: #e8e4d9; margin-bottom: 1rem;">What We Do</h4>
+                            <div style="background: #1a2a1a; padding: 1rem; border-radius: 8px; font-family: monospace; color: #7a9;">
+                                step_emb = step_embed[<strong style="color:#fff;">0</strong>]<br>
+                                <span style="color: #888;"># SAME embedding for ALL steps</span>
+                            </div>
+                            <p style="color: #888; margin-top: 1rem; font-size: 0.9rem;">
+                                The network receives identical conditioning at K=1, K=100, or K=10000. It cannot tell what step it is on.
+                            </p>
+                        </div>
+                        
+                        <div>
+                            <h4 style="color: #e8e4d9; margin-bottom: 1rem;">Why This Matters</h4>
+                            <ul style="color: #888; font-size: 0.9rem; line-height: 1.8;">
+                                <li>Forces the network to learn a <strong style="color:#aaa;">general improvement operator</strong></li>
+                                <li>Cannot learn "at step 5, do X; at step 10, do Y"</li>
+                                <li>Enables <strong style="color:#7a9;">extrapolation to any K</strong>, even ones never seen in training</li>
+                                <li>The same operator applied 1000 times still works</li>
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- THE TINYNETWORK -->
+                <div style="background: linear-gradient(135deg, #1a1a2a 0%, #0d0d15 100%); border-radius: 16px; padding: 2rem; margin-bottom: 2rem; border: 1px solid #333;">
+                    <h3 style="color: #8ac; margin-bottom: 1.5rem;">Inside the TinyNetwork</h3>
+                    
+                    <svg viewBox="0 0 800 200" style="width: 100%; max-width: 800px; margin: 0 auto 1.5rem; display: block;">
+                        <defs>
+                            <linearGradient id="tinyGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+                                <stop offset="0%" style="stop-color:#2a3a5a"/>
+                                <stop offset="100%" style="stop-color:#1e2d4d"/>
+                            </linearGradient>
+                        </defs>
+                        
+                        <!-- Input -->
+                        <rect x="20" y="70" width="100" height="60" rx="6" fill="#1a2a1a" stroke="#4a6741" stroke-width="2"/>
+                        <text x="70" y="95" text-anchor="middle" fill="#7a9" font-size="12" font-weight="bold">x + y</text>
+                        <text x="70" y="115" text-anchor="middle" fill="#888" font-size="10">[B, S, 384]</text>
+                        
+                        <line x1="120" y1="100" x2="160" y2="100" stroke="#888" stroke-width="2" marker-end="url(#arrowhead)"/>
+                        
+                        <!-- Layer 1 -->
+                        <g>
+                            <rect x="170" y="50" width="130" height="100" rx="8" fill="url(#tinyGrad)" stroke="#4a6a9a" stroke-width="2"/>
+                            <text x="235" y="80" text-anchor="middle" fill="#e8e4d9" font-size="11" font-weight="bold">TinyBlock 1</text>
+                            <line x1="185" y1="90" x2="285" y2="90" stroke="#333" stroke-width="1"/>
+                            <text x="235" y="108" text-anchor="middle" fill="#8ac" font-size="10">GQA Attention</text>
+                            <text x="235" y="125" text-anchor="middle" fill="#8ac" font-size="10">SwiGLU FFN</text>
+                            <text x="235" y="142" text-anchor="middle" fill="#ca8" font-size="9">+ step_scale</text>
+                        </g>
+                        
+                        <line x1="300" y1="100" x2="340" y2="100" stroke="#888" stroke-width="2" marker-end="url(#arrowhead)"/>
+                        
+                        <!-- Layer 2 -->
+                        <g>
+                            <rect x="350" y="50" width="130" height="100" rx="8" fill="url(#tinyGrad)" stroke="#4a6a9a" stroke-width="2"/>
+                            <text x="415" y="80" text-anchor="middle" fill="#e8e4d9" font-size="11" font-weight="bold">TinyBlock 2</text>
+                            <line x1="365" y1="90" x2="465" y2="90" stroke="#333" stroke-width="1"/>
+                            <text x="415" y="108" text-anchor="middle" fill="#8ac" font-size="10">GQA Attention</text>
+                            <text x="415" y="125" text-anchor="middle" fill="#8ac" font-size="10">SwiGLU FFN</text>
+                            <text x="415" y="142" text-anchor="middle" fill="#ca8" font-size="9">+ step_scale</text>
+                        </g>
+                        
+                        <text x="500" y="100" text-anchor="middle" fill="#888" font-size="14">...</text>
+                        
+                        <!-- Layer N -->
+                        <g>
+                            <rect x="530" y="50" width="130" height="100" rx="8" fill="url(#tinyGrad)" stroke="#4a6a9a" stroke-width="2"/>
+                            <text x="595" y="80" text-anchor="middle" fill="#e8e4d9" font-size="11" font-weight="bold">TinyBlock 4</text>
+                            <line x1="545" y1="90" x2="645" y2="90" stroke="#333" stroke-width="1"/>
+                            <text x="595" y="108" text-anchor="middle" fill="#8ac" font-size="10">GQA Attention</text>
+                            <text x="595" y="125" text-anchor="middle" fill="#8ac" font-size="10">SwiGLU FFN</text>
+                            <text x="595" y="142" text-anchor="middle" fill="#ca8" font-size="9">+ step_scale</text>
+                        </g>
+                        
+                        <line x1="660" y1="100" x2="700" y2="100" stroke="#888" stroke-width="2" marker-end="url(#arrowhead)"/>
+                        
+                        <!-- RMSNorm -->
+                        <rect x="710" y="70" width="70" height="60" rx="6" fill="#2a2a1a" stroke="#8a7a4a" stroke-width="2"/>
+                        <text x="745" y="95" text-anchor="middle" fill="#ca8" font-size="11" font-weight="bold">RMSNorm</text>
+                        <text x="745" y="115" text-anchor="middle" fill="#888" font-size="9">Final</text>
+                    </svg>
+                    
+                    <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem;">
+                        <div style="background: #0d0d15; padding: 1rem; border-radius: 8px; text-align: center;">
+                            <div style="color: #8ac; font-size: 1.5rem; font-weight: bold;">4</div>
+                            <div style="color: #888; font-size: 0.85rem;">Transformer Layers</div>
+                        </div>
+                        <div style="background: #0d0d15; padding: 1rem; border-radius: 8px; text-align: center;">
+                            <div style="color: #8ac; font-size: 1.5rem; font-weight: bold;">6 / 2</div>
+                            <div style="color: #888; font-size: 0.85rem;">Q Heads / KV Heads (GQA)</div>
+                        </div>
+                        <div style="background: #0d0d15; padding: 1rem; border-radius: 8px; text-align: center;">
+                            <div style="color: #8ac; font-size: 1.5rem; font-weight: bold;">384</div>
+                            <div style="color: #888; font-size: 0.85rem;">Hidden Dimension</div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- MATH TO CODE VISUAL -->
+                <div style="background: #0d0d0d; border-radius: 16px; padding: 2rem; margin-bottom: 2rem;">
+                    <h3 style="color: #e8e4d9; margin-bottom: 1.5rem;">Math to Code: Line by Line</h3>
+                    
+                    <div style="display: grid; gap: 1rem;">
+                        <!-- Row 1 -->
+                        <div style="display: grid; grid-template-columns: 1fr 40px 1fr; align-items: center; background: #1a1a1a; padding: 1rem; border-radius: 8px;">
+                            <div style="font-family: Georgia, serif; color: #e8e4d9; font-size: 1.1rem; text-align: right; padding-right: 1rem;">
+                                x = embed(tokens)
+                            </div>
+                            <div style="text-align: center; color: #4a6741; font-size: 1.5rem;">=</div>
+                            <div style="font-family: monospace; color: #7a9; padding-left: 1rem;">
+                                inputs = self.embed_tokens(input_ids)
+                            </div>
+                        </div>
+                        
+                        <!-- Row 2 -->
+                        <div style="display: grid; grid-template-columns: 1fr 40px 1fr; align-items: center; background: #1a1a1a; padding: 1rem; border-radius: 8px;">
+                            <div style="font-family: Georgia, serif; color: #e8e4d9; font-size: 1.1rem; text-align: right; padding-right: 1rem;">
+                                y<sub>0</sub>, z<sub>0</sub> = init()
+                            </div>
+                            <div style="text-align: center; color: #4a6741; font-size: 1.5rem;">=</div>
+                            <div style="font-family: monospace; color: #7a9; padding-left: 1rem;">
+                                outputs, latents = self.get_initial_states(...)
+                            </div>
+                        </div>
+                        
+                        <!-- Row 3 -->
+                        <div style="display: grid; grid-template-columns: 1fr 40px 1fr; align-items: center; background: #1a2a1a; padding: 1rem; border-radius: 8px; border: 1px solid #3a5a3a;">
+                            <div style="font-family: Georgia, serif; color: #e8e4d9; font-size: 1.1rem; text-align: right; padding-right: 1rem;">
+                                alpha<sub>k</sub> = 0.15/(1+0.15k) * 0.97<sup>k</sup>
+                            </div>
+                            <div style="text-align: center; color: #c9a227; font-size: 1.5rem;">=</div>
+                            <div style="font-family: monospace; color: #ca8; padding-left: 1rem;">
+                                alpha = (0.15 / (1.0 + 0.15 * step)) * (0.97 ** step)
+                            </div>
+                        </div>
+                        
+                        <!-- Row 4 -->
+                        <div style="display: grid; grid-template-columns: 1fr 40px 1fr; align-items: center; background: #1a2a1a; padding: 1rem; border-radius: 8px; border: 1px solid #3a5a3a;">
+                            <div style="font-family: Georgia, serif; color: #e8e4d9; font-size: 1.1rem; text-align: right; padding-right: 1rem;">
+                                f(x + y) = TinyNet(x + y)
+                            </div>
+                            <div style="text-align: center; color: #c9a227; font-size: 1.5rem;">=</div>
+                            <div style="font-family: monospace; color: #ca8; padding-left: 1rem;">
+                                target_suggestion = self.network(combined, step_emb)
+                            </div>
+                        </div>
+                        
+                        <!-- Row 5 - THE KEY EQUATION -->
+                        <div style="display: grid; grid-template-columns: 1fr 40px 1fr; align-items: center; background: #2a1a1a; padding: 1.2rem; border-radius: 8px; border: 2px solid #6a4a3a;">
+                            <div style="font-family: Georgia, serif; color: #e8e4d9; font-size: 1.2rem; text-align: right; padding-right: 1rem; font-weight: bold;">
+                                y<sub>k</sub> = y<sub>k-1</sub> + alpha * (f - y<sub>k-1</sub>)
+                            </div>
+                            <div style="text-align: center; color: #da8; font-size: 1.5rem;">=</div>
+                            <div style="font-family: monospace; color: #da8; padding-left: 1rem; font-weight: bold;">
+                                outputs = outputs + alpha * (target - outputs)
+                            </div>
+                        </div>
+                        
+                        <!-- Row 6 -->
+                        <div style="display: grid; grid-template-columns: 1fr 40px 1fr; align-items: center; background: #1a1a1a; padding: 1rem; border-radius: 8px;">
+                            <div style="font-family: Georgia, serif; color: #e8e4d9; font-size: 1.1rem; text-align: right; padding-right: 1rem;">
+                                h(y<sub>K</sub>) = project(y)
+                            </div>
+                            <div style="text-align: center; color: #4a6741; font-size: 1.5rem;">=</div>
+                            <div style="font-family: monospace; color: #7a9; padding-left: 1rem;">
+                                logits = self.lm_head(outputs)
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- ANIMATED CONVERGENCE VISUALIZATION -->
+                <div style="background: linear-gradient(135deg, #1a1a1a 0%, #0d0d0d 100%); border-radius: 16px; padding: 2rem; margin-bottom: 2rem; border: 1px solid #333;">
+                    <h3 style="color: #e8e4d9; margin-bottom: 1rem;">Watch Convergence Happen</h3>
+                    <p style="color: #888; margin-bottom: 1.5rem;">Click "Start" to see how y approaches the fixed point as K increases.</p>
+                    
+                    <div style="display: flex; gap: 2rem; align-items: center; flex-wrap: wrap;">
+                        <div style="flex: 1; min-width: 300px;">
+                            <svg id="convergenceSvg" viewBox="0 0 400 250" style="width: 100%; background: #0d0d0d; border-radius: 8px;">
+                                <!-- Grid -->
+                                <line x1="50" y1="200" x2="380" y2="200" stroke="#333" stroke-width="1"/>
+                                <line x1="50" y1="200" x2="50" y2="30" stroke="#333" stroke-width="1"/>
+                                
+                                <!-- Labels -->
+                                <text x="215" y="230" text-anchor="middle" fill="#888" font-size="12">Refinement Step (K)</text>
+                                <text x="20" y="115" text-anchor="middle" fill="#888" font-size="12" transform="rotate(-90, 20, 115)">Distance to Fixed Point</text>
+                                
+                                <!-- Fixed point line -->
+                                <line x1="50" y1="190" x2="380" y2="190" stroke="#4a6741" stroke-width="1" stroke-dasharray="5,5"/>
+                                <text x="385" y="193" fill="#4a6741" font-size="10">fixed point</text>
+                                
+                                <!-- The convergence path -->
+                                <path id="convergencePath" d="" fill="none" stroke="#c9a227" stroke-width="2"/>
+                                
+                                <!-- Current point -->
+                                <circle id="currentPoint" cx="50" cy="50" r="6" fill="#c9a227">
+                                    <animate attributeName="opacity" values="1;0.5;1" dur="0.5s" repeatCount="indefinite"/>
+                                </circle>
+                            </svg>
+                        </div>
+                        
+                        <div style="flex: 0 0 200px;">
+                            <button id="startConvergence" style="background: #4a6741; color: #fff; border: none; padding: 1rem 2rem; border-radius: 8px; cursor: pointer; font-size: 1rem; width: 100%; margin-bottom: 1rem;">Start Animation</button>
+                            <div style="background: #1a1a1a; padding: 1rem; border-radius: 8px;">
+                                <div style="color: #888; font-size: 0.9rem;">Current Step</div>
+                                <div id="currentStep" style="color: #c9a227; font-size: 2rem; font-weight: bold;">0</div>
+                                <div style="color: #888; font-size: 0.9rem; margin-top: 0.5rem;">Alpha Value</div>
+                                <div id="currentAlpha" style="color: #7a9; font-size: 1.2rem; font-family: monospace;">0.150</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <script>
+                (function() {
+                    const btn = document.getElementById('startConvergence');
+                    const path = document.getElementById('convergencePath');
+                    const point = document.getElementById('currentPoint');
+                    const stepDisplay = document.getElementById('currentStep');
+                    const alphaDisplay = document.getElementById('currentAlpha');
+                    
+                    let animating = false;
+                    
+                    function getAlpha(k) {
+                        return (0.15 / (1 + 0.15 * k)) * Math.pow(0.97, k);
+                    }
+                    
+                    function animate() {
+                        if (animating) return;
+                        animating = true;
+                        btn.textContent = 'Running...';
+                        btn.disabled = true;
+                        
+                        let k = 0;
+                        let distance = 150; // Starting distance
+                        let pathD = 'M 50 50';
+                        
+                        function step() {
+                            if (k > 64) {
+                                animating = false;
+                                btn.textContent = 'Restart';
+                                btn.disabled = false;
+                                return;
+                            }
+                            
+                            const alpha = getAlpha(k);
+                            distance = distance * (1 - alpha);
+                            
+                            const x = 50 + (k / 64) * 330;
+                            const y = 190 - distance;
+                            
+                            pathD += ` L ${x} ${y}`;
+                            path.setAttribute('d', pathD);
+                            point.setAttribute('cx', x);
+                            point.setAttribute('cy', y);
+                            stepDisplay.textContent = k;
+                            alphaDisplay.textContent = alpha.toFixed(4);
+                            
+                            k++;
+                            setTimeout(step, 80);
+                        }
+                        
+                        // Reset
+                        path.setAttribute('d', '');
+                        pathD = 'M 50 50';
+                        distance = 150;
+                        
+                        step();
+                    }
+                    
+                    btn.addEventListener('click', animate);
+                })();
+                </script>
             </div>
         </section>
         
