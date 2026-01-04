@@ -148,6 +148,120 @@ This hybrid hyperbolic-exponential decay ensures:
 
 ![Decay Schedule](figures/fig3_decay.png)
 
+### 3.4 Complete Algorithm: Pseudocode and Data Flow
+
+For those who want to understand exactly what happens during a forward pass, here is the complete algorithm.
+
+#### Data Flow Diagram
+
+```
+INPUT: tokens [B, S]
+         |
+         v
++------------------+
+|  embed_tokens    |  --> x [B, S, D]  (token embeddings)
++------------------+
+         |
+         v
++------------------+
+|  Initial States  |  --> y_0 = learnable_output_init [B, S, D]
+|                  |  --> z_0 = learnable_latent_init [B, S, D]
++------------------+
+         |
+         v
++========================================+
+|        REFINEMENT LOOP (K times)       |
+|========================================|
+|  For step = 1 to K:                    |
+|                                        |
+|    1. Compute decay: alpha_k           |
+|       alpha_k = (0.15 / (1 + 0.15*k))  |
+|                 * (0.97^k)             |
+|                                        |
+|    2. Get step embedding:              |
+|       s = step_proj(step_embed[0])     |
+|       (SAME embedding for ALL steps)   |
+|                                        |
+|    3. Output refinement:               |
+|       combined = x + y_{k-1}           |
+|       target = TinyNetwork(combined,s) |
+|       y_k = y_{k-1} + alpha_k *        |
+|             (target - y_{k-1})         |
+|                                        |
+|    4. Latent refinement (2 iters):     |
+|       for i in 1..2:                   |
+|         lat_comb = x + y_k + z         |
+|         lat_tgt = TinyNetwork(lat_comb)|
+|         z = z + alpha_k*(lat_tgt - z)  |
+|                                        |
+|    5. Compute halt probability:        |
+|       p_halt = sigmoid(halt_net(y_k))  |
++========================================+
+         |
+         v
++------------------+
+|     lm_head      |  --> logits [B, S, V]
++------------------+
+         |
+         v
+OUTPUT: next-token probabilities
+```
+
+#### Pseudocode (Python-like)
+
+```python
+def ISRM_forward(tokens, K):
+    # Embed input
+    x = embed_tokens(tokens)  # [B, S, D]
+    
+    # Initialize states
+    y = output_init.expand(B, S, D)  # learnable
+    z = latent_init.expand(B, S, D)  # learnable
+    
+    # Refinement loop
+    for k in range(1, K + 1):
+        # Compute step-dependent decay
+        alpha = (0.15 / (1 + 0.15 * k)) * (0.97 ** k)
+        
+        # Get step embedding (SAME for all k)
+        step_emb = step_proj(step_embed[0])
+        
+        # Output refinement: y moves toward network suggestion
+        target = TinyNetwork(x + y, step_emb)
+        y = y + alpha * (target - y)
+        
+        # Latent refinement (2 sub-iterations)
+        for _ in range(2):
+            lat_target = TinyNetwork(x + y + z, step_emb)
+            z = z + alpha * (lat_target - z)
+    
+    # Project to vocabulary
+    logits = lm_head(y)
+    return logits
+```
+
+#### Math-to-Code Mapping
+
+| Mathematical Notation | Code Variable | Description |
+|----------------------|---------------|-------------|
+| x | `inputs` | Token embeddings from `embed_tokens(input_ids)` |
+| y_0 | `outputs` | Initialized from `self.output_init` |
+| z_0 | `latents` | Initialized from `self.latent_init` |
+| alpha_k | `alpha` | Decay schedule value at step k |
+| f(.) | `self.network()` | The TinyNetwork transformer |
+| y_k | `outputs` | Updated in `single_refinement_step` |
+| h(y_k) | `lm_head(outputs)` | Final projection to logits |
+
+#### Why This Design?
+
+1. **Stateless refinement**: Using the same step embedding for all k forces the network to learn a general "improve this state" operator, not step-specific behavior. This enables extrapolation to any K.
+
+2. **Fixed decay schedule**: The alpha values are NOT learned. This prevents the network from "cheating" by outputting large corrections at high K. Convergence is forced by the schedule.
+
+3. **Latent iterations**: Two latent refinement passes per output refinement. The latent acts as working memory that helps the output refinement.
+
+4. **Input always visible**: `x` (token embeddings) is added at every step. The network always sees the original input, not just its own refinements
+
 ### 3.4 Single Refinement Step
 
 ```python
