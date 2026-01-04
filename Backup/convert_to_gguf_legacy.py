@@ -20,11 +20,11 @@ import torch
 from transformers import AutoTokenizer
 
 from model import SmallLM, ModelConfig
-from train import TrainingConfig  # Needed for checkpoint deserialization
+from train import TrainingConfig
 
 
 # GGUF constants
-GGUF_MAGIC = 0x46554747  # "GGUF" in little endian
+GGUF_MAGIC = 0x46554747
 GGUF_VERSION = 3
 
 # GGUF value types
@@ -148,7 +148,7 @@ class GGUFWriter:
         elif value_type == GGUF_TYPE_ARRAY:
             if len(value) == 0:
                 raise ValueError("Empty arrays not supported")
-            # Determine element type
+
             elem = value[0]
             if isinstance(elem, bool):
                 elem_type = GGUF_TYPE_BOOL
@@ -179,8 +179,8 @@ class GGUFWriter:
             GGML_TYPE_F32: 4,
             GGML_TYPE_F16: 2,
             GGML_TYPE_BF16: 2,
-            GGML_TYPE_Q8_0: 1,  # Approximate
-            GGML_TYPE_Q4_0: 0.5,  # Approximate
+            GGML_TYPE_Q8_0: 1,
+            GGML_TYPE_Q4_0: 0.5,
         }
         return sizes.get(tensor_type, 2)
     
@@ -191,10 +191,10 @@ class GGUFWriter:
         elif tensor_type == GGML_TYPE_F16:
             return tensor.astype(np.float16)
         elif tensor_type == GGML_TYPE_BF16:
-            # NumPy doesn't have native bf16, so we do it manually
-            # Convert to float32 first, then reinterpret as bf16
+
+
             f32 = tensor.astype(np.float32)
-            # BF16 is just the top 16 bits of F32
+
             f32_bits = f32.view(np.uint32)
             bf16_bits = (f32_bits >> 16).astype(np.uint16)
             return bf16_bits
@@ -204,58 +204,58 @@ class GGUFWriter:
     def write(self):
         """Write the GGUF file."""
         with open(self.output_path, "wb") as f:
-            # Write header
+
             f.write(struct.pack("<I", GGUF_MAGIC))
             f.write(struct.pack("<I", GGUF_VERSION))
-            f.write(struct.pack("<Q", len(self.tensors)))  # n_tensors
-            f.write(struct.pack("<Q", len(self.metadata)))  # n_kv
+            f.write(struct.pack("<Q", len(self.tensors)))
+            f.write(struct.pack("<Q", len(self.metadata)))
             
-            # Write metadata
+
             for key, (value, value_type) in self.metadata.items():
                 self._write_string(f, key)
                 self._write_value(f, value, value_type)
             
-            # Calculate tensor data offset (must be aligned to 32 bytes)
+
             tensor_info_size = 0
             for name, info in self.tensors.items():
-                tensor_info_size += 8 + len(name.encode("utf-8"))  # string length + string
-                tensor_info_size += 4  # n_dims
-                tensor_info_size += 8 * len(info["shape"])  # dimensions
-                tensor_info_size += 4  # type
-                tensor_info_size += 8  # offset
+                tensor_info_size += 8 + len(name.encode("utf-8"))
+                tensor_info_size += 4
+                tensor_info_size += 8 * len(info["shape"])
+                tensor_info_size += 4
+                tensor_info_size += 8
             
             current_pos = f.tell() + tensor_info_size
             padding = (32 - (current_pos % 32)) % 32
             data_start = current_pos + padding
             
-            # Calculate tensor offsets
+
             tensor_offsets = {}
             current_offset = 0
             for name, info in self.tensors.items():
                 tensor_offsets[name] = current_offset
                 converted = self._convert_to_dtype(info["data"], info["type"])
                 current_offset += converted.nbytes
-                # Align to 32 bytes
+
                 current_offset = ((current_offset + 31) // 32) * 32
             
-            # Write tensor info
+
             for name, info in self.tensors.items():
                 self._write_string(f, name)
                 shape = info["shape"]
                 f.write(struct.pack("<I", len(shape)))
-                for dim in reversed(shape):  # GGUF stores in reverse order
+                for dim in reversed(shape):
                     f.write(struct.pack("<Q", dim))
                 f.write(struct.pack("<I", info["type"]))
                 f.write(struct.pack("<Q", tensor_offsets[name]))
             
-            # Write padding
+
             f.write(b"\x00" * padding)
             
-            # Write tensor data
+
             for name, info in self.tensors.items():
                 converted = self._convert_to_dtype(info["data"], info["type"])
                 f.write(converted.tobytes())
-                # Pad to 32-byte alignment
+
                 pad_size = ((converted.nbytes + 31) // 32) * 32 - converted.nbytes
                 f.write(b"\x00" * pad_size)
         
@@ -264,7 +264,7 @@ class GGUFWriter:
 
 def map_tensor_name(pytorch_name: str) -> str:
     """Map PyTorch tensor names to GGUF/llama.cpp names."""
-    # Standard LLaMA-style naming for llama.cpp
+
     mappings = {
         "embed_tokens.weight": "token_embd.weight",
         "norm.weight": "output_norm.weight",
@@ -274,16 +274,16 @@ def map_tensor_name(pytorch_name: str) -> str:
     if pytorch_name in mappings:
         return mappings[pytorch_name]
     
-    # Layer mappings
-    # layers.X.attention.wq.weight -> blk.X.attn_q.weight
-    # layers.X.attention.wk.weight -> blk.X.attn_k.weight
-    # layers.X.attention.wv.weight -> blk.X.attn_v.weight
-    # layers.X.attention.wo.weight -> blk.X.attn_output.weight
-    # layers.X.feed_forward.w1.weight -> blk.X.ffn_gate.weight
-    # layers.X.feed_forward.w2.weight -> blk.X.ffn_down.weight
-    # layers.X.feed_forward.w3.weight -> blk.X.ffn_up.weight
-    # layers.X.attention_norm.weight -> blk.X.attn_norm.weight
-    # layers.X.ffn_norm.weight -> blk.X.ffn_norm.weight
+
+
+
+
+
+
+
+
+
+
     
     if pytorch_name.startswith("layers."):
         parts = pytorch_name.split(".")
@@ -305,7 +305,7 @@ def map_tensor_name(pytorch_name: str) -> str:
         if subname in layer_mappings:
             return f"blk.{layer_idx}.{layer_mappings[subname]}"
     
-    # Unknown name, return as-is with warning
+
     print(f"  Warning: Unknown tensor name: {pytorch_name}")
     return pytorch_name
 
@@ -325,10 +325,10 @@ def convert_to_gguf(
 ):
     """Convert PyTorch model to GGUF format."""
     
-    # Load checkpoint
+
     checkpoint = load_checkpoint(model_path)
     
-    # Extract config from checkpoint
+
     config_data = checkpoint.get("config")
     if config_data is None:
         print("Warning: No config found in checkpoint, using defaults")
@@ -358,12 +358,12 @@ def convert_to_gguf(
     print(f"  rope_theta: {config.rope_theta}")
     print(f"  head_dim: {config.head_dim}")
     
-    # Load tokenizer first to get actual vocab size
+
     print(f"Loading tokenizer: {tokenizer_name}")
     try:
         tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, trust_remote_code=True)
         
-        # Add special tokens exactly as in dataset.py
+
         special_tokens = ["<|im_start|>", "<|im_end|>", "<think>", "</think>"]
         print(f"  Adding special tokens: {special_tokens}")
         num_added = tokenizer.add_special_tokens({
@@ -375,11 +375,11 @@ def convert_to_gguf(
         actual_vocab_size = len(tokenizer)
         print(f"  Tokenizer vocab size: {vocab_size} (len={actual_vocab_size})")
         
-        # Override config vocab size if different
+
         if actual_vocab_size != config.vocab_size:
             print(f"  Warning: Config vocab size ({config.vocab_size}) != Tokenizer size ({actual_vocab_size})")
             
-        # Extract tokens
+
         vocab = tokenizer.get_vocab()
         sorted_vocab = sorted(vocab.items(), key=lambda x: x[1])
         id_to_token = {v: k for k, v in vocab.items()}
@@ -394,27 +394,27 @@ def convert_to_gguf(
             all_tokens.append(token_str)
             scores.append(0.0)
             
-            # Mark special tokens
+
             if token_str in special_tokens:
-                token_types.append(3) # CONTROL
+                token_types.append(3)
             else:
-                token_types.append(1) # NORMAL
+                token_types.append(1)
             
     except Exception as e:
         print(f"Warning: Failed to extract tokenizer vocab: {e}")
-        # Fallback to config size if tokenizer fails
+
         actual_vocab_size = config.vocab_size
         all_tokens = []
         scores = []
         token_types = []
     
-    # Get state dict
+
     state_dict = checkpoint.get("model_state_dict", checkpoint)
     
-    # Create GGUF writer
+
     writer = GGUFWriter(output_path, arch="llama")
     
-    # Set tensor type based on dtype
+
     if dtype == "bf16":
         tensor_type = GGML_TYPE_BF16
         print(f"\nOutput dtype: BF16")
@@ -427,13 +427,13 @@ def convert_to_gguf(
     else:
         raise ValueError(f"Unknown dtype: {dtype}")
     
-    # Add metadata
+
     writer.add_metadata("general.architecture", "llama")
     writer.add_metadata("general.name", "SmallLM")
     writer.add_metadata("general.quantization_version", 2, GGUF_TYPE_UINT32)
     writer.add_metadata("general.file_type", 1 if dtype == "f16" else (32 if dtype == "bf16" else 0), GGUF_TYPE_UINT32)
     
-    # LLaMA architecture parameters
+
     writer.add_metadata("llama.vocab_size", actual_vocab_size, GGUF_TYPE_UINT32)
     writer.add_metadata("llama.context_length", config.max_seq_len, GGUF_TYPE_UINT32)
     writer.add_metadata("llama.embedding_length", config.dim, GGUF_TYPE_UINT32)
@@ -445,18 +445,18 @@ def convert_to_gguf(
     writer.add_metadata("llama.attention.layer_norm_rms_epsilon", config.rms_norm_eps, GGUF_TYPE_FLOAT32)
     writer.add_metadata("llama.rope.freq_base", config.rope_theta, GGUF_TYPE_FLOAT32)
     
-    # Add tokenizer metadata
+
     writer.add_metadata("tokenizer.ggml.model", "gpt2") 
     writer.add_metadata("tokenizer.ggml.bos_token_id", 1, GGUF_TYPE_UINT32)
     writer.add_metadata("tokenizer.ggml.eos_token_id", 2, GGUF_TYPE_UINT32) 
     writer.add_metadata("tokenizer.ggml.padding_token_id", 0, GGUF_TYPE_UINT32)
-    writer.add_metadata("tokenizer.ggml.pre", "qwen2") # Important for Qwen tokenizer
+    writer.add_metadata("tokenizer.ggml.pre", "qwen2")
     
-    # Extract real merges
+
     print("  Extracting merges...")
     merges = []
     try:
-        # Save tokenizer to temp location to get merges.txt
+
         temp_tok_dir = "temp_tokenizer_extract"
         if not os.path.exists(temp_tok_dir):
             tokenizer.save_pretrained(temp_tok_dir)
@@ -464,7 +464,7 @@ def convert_to_gguf(
         merges_file = os.path.join(temp_tok_dir, "merges.txt")
         if os.path.exists(merges_file):
             with open(merges_file, "r", encoding="utf-8") as f:
-                # Skip version line and read merges
+
                 merges = [line.strip() for line in f.readlines()[1:] if line.strip()]
             print(f"  Loaded {len(merges)} merges")
         else:
@@ -482,40 +482,40 @@ def convert_to_gguf(
         writer.add_metadata("tokenizer.ggml.scores", scores)
         writer.add_metadata("tokenizer.ggml.token_type", token_types)
 
-    # Convert and add tensors
+
     print(f"\nConverting {len(state_dict)} tensors...")
     
-    # Track if we need to add output weights separately (for tied embeddings)
+
     has_lm_head = "lm_head.weight" in state_dict
     embed_weight = None
     
     for name, tensor in state_dict.items():
-        # Skip rope buffers (they get recomputed)
+
         if "rope_" in name:
             continue
         
-        # Convert to numpy
+
         np_tensor = tensor.float().numpy()
         
-        # Map name
+
         gguf_name = map_tensor_name(name)
         
-        # Store embed weight for potential tie
+
         if name == "embed_tokens.weight":
             embed_weight = np_tensor
         
         print(f"  {name} -> {gguf_name} {np_tensor.shape}")
         writer.add_tensor(gguf_name, np_tensor, tensor_type)
     
-    # If embeddings are tied and lm_head wasn't in state_dict, add it
+
     if not has_lm_head and embed_weight is not None and config.tie_word_embeddings:
         print(f"  Adding tied output weights: output.weight {embed_weight.shape}")
         writer.add_tensor("output.weight", embed_weight, tensor_type)
     
-    # Write the file
+
     writer.write()
     
-    # Print stats
+
     file_size = Path(output_path).stat().st_size
     print(f"\nConversion complete!")
     print(f"  Output file: {output_path}")

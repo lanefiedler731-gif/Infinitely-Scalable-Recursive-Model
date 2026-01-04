@@ -1,124 +1,66 @@
-# =========================================================
-# FP8 Training Configuration for RTX 5090 Blackwell
-# =========================================================
-# Optimized for CUDA graphs compatibility and FP8 training
+# Configuration for Infinitely Scalable Recursive Model (ISRM)
+# ============================================================
+# The world's first model where quality scales with inference loops!
 
-# Model Architecture (~791M params - Balanced for Training)
-# Well-balanced architecture: not too deep, good width
 model:
-  vocab_size: 32000           # Will be overridden by tokenizer size
-  dim: 1280                   # Good width for representation
-  n_layers: 28                # Reasonable depth (not too deep!)
-  n_heads: 20                 # Attention heads (head_dim = 64)
-  n_kv_heads: 5               # GQA (4:1 ratio)
-  intermediate_size: 4480     # ~3.5x dim for SwiGLU
-  max_seq_len: 1024           # Maximum sequence length
-  rope_theta: 10000.0         # RoPE base frequency
-  rms_norm_eps: 1e-5          # Slightly larger epsilon for stability
-  tie_word_embeddings: true   # Share input/output embeddings
+  # Architecture
+  dim: 384                    # Increased for better learning
+  n_layers: 4                 # Deeper network
+  n_heads: 6                  # More heads
+  n_kv_heads: 2               # GQA for efficiency  
+  intermediate_size: 1024     # Larger FFN
+  max_seq_len: 1024           # Max sequence length
+  rope_theta: 10000.0
+  rms_norm_eps: 1e-6
+  tie_word_embeddings: true
 
-# Training Settings
-# No gradient checkpointing = CUDA graph compatible
-# Using standard AdamW
+# Scalability parameters - THE KEY INNOVATION!
+scalable:
+  # Training K range - model learns to work at ANY loop count
+  train_k_min: 1              # Train with as few as 1 loop
+  train_k_max: 16             # Train up to 16, should generalize beyond
+  default_k: 8                # Default inference loops
+  n_latent_iter: 1            # Reduced for memory
+  
+  # Convergence training - ensures quality scales with loops
+  convergence_loss_weight: 0.1   # Penalize if later steps aren't better
+  contrastive_loss_weight: 0.05  # Encourage higher confidence at later steps
+  
+  # Step embeddings - enables extrapolation beyond training K
+  max_step_embeddings: 256    # Can extrapolate beyond this
+  gate_init_bias: -2.0        # Conservative gate initialization
+
 training:
-  batch_size: 4               # Keep small for safety  
-  gradient_accumulation: 8    # Increased for effective batch = 32
-  max_steps: 200000            # Training steps
-  warmup_steps: 1000          # Longer warmup for stability
-  learning_rate: 3e-4         # Standard LR for ~800M model
-  weight_decay: 0.1           # AdamW weight decay
-  max_grad_norm: 1.0          # Standard gradient clipping
-  adam_beta1: 0.9             # AdamW beta1
-  adam_beta2: 0.95            # AdamW beta2 (lower for stability)
-  adam_epsilon: 1e-8          # AdamW epsilon
+  batch_size: 6                # Max that fits in 32GB GPU
+  gradient_accumulation: 1     # DISABLED for speed!
+  max_steps: 50000
+  warmup_steps: 1000
+  learning_rate: 5e-4
+  weight_decay: 0.1
+  max_grad_norm: 1.0
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_epsilon: 1e-8
+  
+  # Precision
+  use_bf16: true
+  
+  # Compilation - DISABLED (dynamic K breaks CUDA graphs)
+  compile_enabled: false
+  compile_mode: "reduce-overhead"
 
-# FP8 Settings (RTX 5090 Blackwell optimized)
-# Native FP8 support on Blackwell architecture (compute capability 10.0+)
-fp8:
-  enabled: true               # Enable FP8 training
-  format: "e4m3"              # E4M3 for forward pass, E5M2 for backward
-  amax_history_len: 16        # AMAX history length for dynamic scaling
-  amax_compute_algo: "max"    # How to compute AMAX (max/most_recent)
+logging:
+  log_interval: 10
+  eval_interval: 10000  # Evaluate/benchmark every 10k steps
+  save_interval: 2000
+  output_dir: "./outputs"
 
-# Compilation & CUDA Graphs
-# max-autotune enables CUDA graphs for maximum performance
-# fullgraph=true captures entire forward/backward in single graph
-# dynamic=false for static shapes (required for CUDA graphs)
-compile:
-  enabled: true               # Enable torch.compile
-  mode: "max-autotune"        # Maximum performance with CUDA graphs
-  fullgraph: true             # Force full graph compilation
-  dynamic: false              # Static shapes (needed for CUDA graphs)
-
-# Data Settings
-# Includes TeichAI reasoning datasets plus OpenThoughts (1.2M examples)
-data:
-  datasets:
-    - "TeichAI/MiMo-V2-Flash-2300x"      # 2,337 examples
-    - "TeichAI/glm-4.7-2000x"            # 1,978 examples
-    - "TeichAI/minimax-m2.1-1000x"       # ~1,000 examples
-    - "TeichAI/claude-4.5-opus-high-reasoning-250x"  # 250 examples
-    - "Open-Orca/OpenOrca"               # OpenOrca (Reasoning/Instruction mix)
-    - "open-thoughts/OpenThoughts3-1.2M" # 1.2M reasoning examples
-    - "tatsu-lab/alpaca"                 # 52k General Instructions (Fixes mode collapse)
-  cache_dir: "./data_cache"   # Where to cache downloaded datasets
-  merged_path: "./data_merged"  # Where to save merged dataset
-  train_split: 0.95           # Train/validation split ratio
-  seed: 42                    # Random seed for reproducibility
-  max_samples_per_dataset: 100000  # Cap at 100k to ensure Alpaca (52k) is not drowned out (1:2 ratio)
-
-# Tokenizer (using Qwen2.5 - open and high quality)
 tokenizer:
   name: "Qwen/Qwen2.5-0.5B"
 
-# Logging & Checkpoints
-logging:
-  log_interval: 10            # Log every N steps
-  eval_interval: 2000          # Evaluate every N steps
-  save_interval: 4000         # Save checkpoint every N steps
-  output_dir: "./outputs"     # Output directory for checkpoints
-  wandb_project: "fp8-training"
-  wandb_enabled: false        # Enable Weights & Biases logging
-
-# Special tokens for chat format
-# Using standard ChatML-style format
-format:
-  im_start: "<|im_start|>"
-  im_end: "<|im_end|>"
-  think_start: "<think>"
-  think_end: "</think>"
-  
-# Label masking configuration
-# Ensures model only learns to generate assistant responses
-# User prompts are masked from loss computation
-loss:
-  mask_user_tokens: true      # Don't compute loss on user tokens
-  mask_system_tokens: true    # Don't compute loss on system tokens
-  mask_special_tokens: true   # Don't compute loss on format tokens
-
-# =========================================================
-# Performance Optimizations (DO NOT AFFECT MODEL QUALITY)
-# =========================================================
-# These optimizations speed up training without changing:
-# - Model weights or architecture
-# - Training convergence behavior
-# - Final model quality
-#
-# Enabled automatically in train.py and dataset.py:
-#
-# CUDA Backend Optimizations:
-#   - TF32 matmul precision: 2-6x faster matrix operations on Ampere+
-#   - cuDNN benchmark: auto-selects fastest algorithms for fixed shapes
-#   - cuDNN TF32: enables TF32 for all cuDNN operations
-#   - Expandable memory segments: reduces GPU memory fragmentation
-#
-# DataLoader Optimizations:
-#   - persistent_workers: avoids worker restart overhead between epochs
-#   - prefetch_factor: pre-queues batches to minimize GPU idle time
-#   - pin_memory: enables faster async CPU->GPU transfers
-#
-# Memory Management:
-#   - Periodic garbage collection and CUDA cache clearing at checkpoints
-#   - CUDA warmup for consistent timing from step 1
-#
-# All optimizations are NVIDIA-validated to not affect model quality.
+data:
+  # Using defaults from dataset.py:
+  # - No limit on samples per dataset (uses all available)
+  # - Default datasets: TeichAI/MiMo-V2-Flash-2300x, TeichAI/glm-4.7-2000x, 
+  #   TeichAI/minimax-m2.1-1000x, TeichAI/claude-4.5-opus-high-reasoning-250x,
+  #   open-thoughts/OpenThoughts3-1.2M, a-m-team/AM-DeepSeek-R1-0528-Distilled

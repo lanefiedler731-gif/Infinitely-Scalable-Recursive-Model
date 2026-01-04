@@ -1,0 +1,17 @@
+# Data caches
+data_cache/
+data_merged/
+outputs/
+*.arrow
+*.jsonl
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+.env
+
+# Checkpoints
+*.pt
+*.bin

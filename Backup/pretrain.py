@@ -47,8 +47,8 @@ if torch.cuda.is_available():
 @dataclass
 class PretrainConfig:
     """Pretraining configuration."""
-    # Model
-    vocab_size: int = 151936  # Qwen tokenizer size
+
+    vocab_size: int = 151936
     dim: int = 1280
     n_layers: int = 28
     n_heads: int = 20
@@ -59,17 +59,17 @@ class PretrainConfig:
     rms_norm_eps: float = 1e-5
     tie_word_embeddings: bool = True
     
-    # Data
+
     dataset_name: str = "HuggingFaceFW/fineweb-edu"
     dataset_config: str = "sample-100BT"
     tokenizer_name: str = "Qwen/Qwen2.5-0.5B"
     cache_dir: str = "./pretrain_cache"
     shuffle_buffer: int = 10000
     
-    # Training
+
     batch_size: int = 4
-    gradient_accumulation: int = 16  # Effective batch = 64
-    max_steps: int = 500000  # ~100B tokens / (64 * 1024) ≈ steps needed
+    gradient_accumulation: int = 16
+    max_steps: int = 500000
     warmup_steps: int = 2000
     learning_rate: float = 3e-4
     min_lr: float = 3e-5
@@ -79,11 +79,11 @@ class PretrainConfig:
     adam_beta2: float = 0.95
     adam_epsilon: float = 1e-8
     
-    # FP8/Precision
+
     dtype: str = "bfloat16"
     compile_model: bool = True
     
-    # Logging
+
     log_interval: int = 10
     save_interval: int = 5000
     output_dir: str = "./pretrain_outputs"
@@ -100,7 +100,7 @@ class PretrainConfig:
             else:
                 continue
         
-        # Ensure float fields are actually floats (YAML sometimes parses scientific notation as strings)
+
         float_fields = ['learning_rate', 'min_lr', 'weight_decay', 'max_grad_norm', 
                         'adam_beta1', 'adam_beta2', 'adam_epsilon', 'rope_theta', 'rms_norm_eps']
         for field in float_fields:
@@ -117,16 +117,16 @@ class Pretrainer:
         self.config = config
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
-        # Output directory
+
         self.output_dir = Path(config.output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
-        # Training state
+
         self.global_step = 0
         self.tokens_seen = 0
         self.best_loss = float('inf')
         
-        # Dtype
+
         self.dtype = torch.bfloat16 if config.dtype == "bfloat16" else torch.float16
         
         print(f"Pretraining on: {self.device}")
@@ -191,7 +191,7 @@ class Pretrainer:
         print(f"Total tokens (estimated): {tokens_per_step * self.config.max_steps / 1e9:.1f}B")
         print("="*60 + "\n")
         
-        # Create dataloader
+
         dataloader, tokenizer = create_pretrain_dataloader(
             dataset_name=self.config.dataset_name,
             dataset_config=self.config.dataset_config,
@@ -203,19 +203,19 @@ class Pretrainer:
             cache_dir=self.config.cache_dir,
         )
         
-        # Create model - always defer compilation, we'll compile after everything is set up
+
         model = self.create_model(len(tokenizer), compile=False)
         
-        # Load checkpoint if resuming (model weights only, before compilation)
+
         start_step = 0
         if resume_from:
             start_step = self.load_checkpoint(model, resume_from)
             print(f"Resuming training from step {start_step}")
         
-        # Now compile model (CUDA graphs will be built with loaded state)
+
         model = self.compile_model(model)
         
-        # Create optimizer AFTER compilation (fresh optimizer, LR scheduler handles correct rate)
+
         optimizer = AdamW(
             model.parameters(),
             lr=self.config.learning_rate,
@@ -224,7 +224,7 @@ class Pretrainer:
             weight_decay=self.config.weight_decay,
         )
         
-        # Training loop
+
         model.train()
         optimizer.zero_grad()
         
@@ -235,19 +235,19 @@ class Pretrainer:
         from tqdm import tqdm
         pbar = tqdm(range(start_step, self.config.max_steps), desc="Pretraining", initial=start_step, total=self.config.max_steps)
         
-        # Token tracking based on actual batch size (no gradient accumulation for CUDA graphs)
+
         tokens_per_step = self.config.batch_size * self.config.max_seq_len
         
         for step in pbar:
-            # Mark step begin for CUDA graphs - MUST be before any tensor ops
+
             if hasattr(torch.compiler, 'cudagraph_mark_step_begin'):
                 torch.compiler.cudagraph_mark_step_begin()
             
-            # Get batch
+
             try:
                 batch = next(data_iter)
             except StopIteration:
-                # Restart data iterator (epoch boundary)
+
                 data_iter = iter(dataloader)
                 batch = next(data_iter)
             
@@ -255,35 +255,35 @@ class Pretrainer:
             labels = batch['labels'].to(self.device)
             label_mask = batch['label_mask'].to(self.device)
             
-            # Forward pass
+
             with torch.amp.autocast('cuda', dtype=self.dtype):
                 logits, loss = model(input_ids, labels=labels, label_mask=label_mask)
             
-            # Clone loss for logging before backward
+
             loss_value = loss.detach().clone().item()
             
-            # Backward
+
             loss.backward()
             
-            # Gradient clipping
+
             grad_norm = torch.nn.utils.clip_grad_norm_(
                 model.parameters(),
                 self.config.max_grad_norm
             )
             
-            # Update learning rate
+
             lr = self.get_lr(step)
             for param_group in optimizer.param_groups:
                 param_group['lr'] = lr
             
-            # Optimizer step
+
             optimizer.step()
             optimizer.zero_grad()
             
             self.global_step += 1
             self.tokens_seen += tokens_per_step
             
-            # Logging
+
             if self.global_step % self.config.log_interval == 0:
                 elapsed = time.time() - start_time
                 tokens_per_sec = self.tokens_seen / elapsed
@@ -295,11 +295,11 @@ class Pretrainer:
                     'tokens': f'{self.tokens_seen/1e9:.2f}B',
                 })
             
-            # Save checkpoint
+
             if self.global_step % self.config.save_interval == 1:
                 self.save_checkpoint(model, optimizer, loss_value)
         
-        # Final save
+
         self.save_checkpoint(model, optimizer, loss_value, final=True)
         print(f"\nPretraining complete!")
         print(f"Total tokens: {self.tokens_seen/1e9:.2f}B")
@@ -307,7 +307,7 @@ class Pretrainer:
     
     def save_checkpoint(self, model, optimizer, loss, final=False):
         """Save checkpoint, keeping only the last 3 step checkpoints."""
-        # Get underlying model if compiled
+
         model_to_save = model._orig_mod if hasattr(model, '_orig_mod') else model
         
         checkpoint = {
@@ -327,22 +327,22 @@ class Pretrainer:
         torch.save(checkpoint, path)
         print(f"\nCheckpoint saved: {path}")
         
-        # Also save latest
+
         torch.save(checkpoint, self.output_dir / "pretrain_latest.pt")
         
-        # Save best
+
         if loss < self.best_loss:
             self.best_loss = loss
             torch.save(checkpoint, self.output_dir / "pretrain_best.pt")
         
-        # Cleanup old checkpoints - keep only the last 3 step checkpoints
+
         if not final:
             import glob
             step_checkpoints = sorted(
                 glob.glob(str(self.output_dir / "pretrain_step_*.pt")),
                 key=lambda x: int(x.split('_step_')[1].split('.pt')[0])
             )
-            # Keep only the last 3
+
             for old_ckpt in step_checkpoints[:-3]:
                 try:
                     os.remove(old_ckpt)
@@ -354,19 +354,19 @@ class Pretrainer:
         """Load checkpoint and restore training state (model weights only for CUDA graphs compatibility)."""
         print(f"Loading checkpoint: {checkpoint_path}")
         
-        # Register TrainingConfig as alias for PretrainConfig to handle checkpoints
-        # saved by train.py (which uses TrainingConfig class)
+
+
         import sys
         sys.modules['__main__'].TrainingConfig = PretrainConfig
         
         checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
         
-        # Load model weights (before compilation)
+
         model_to_load = model._orig_mod if hasattr(model, '_orig_mod') else model
         model_to_load.load_state_dict(checkpoint['model_state_dict'])
         
-        # Note: We don't load optimizer state - CUDA graphs are incompatible with loaded optimizer tensors
-        # The LR scheduler will use the correct learning rate based on step number
+
+
         
         self.global_step = checkpoint['global_step']
         self.tokens_seen = checkpoint['tokens_seen']
@@ -388,7 +388,7 @@ def main():
                         help='Path to checkpoint file to resume from')
     args = parser.parse_args()
     
-    # Load config
+
     if Path(args.config).exists():
         config = PretrainConfig.from_yaml(args.config)
     else:
@@ -396,7 +396,7 @@ def main():
         print("Using default config...")
         config = PretrainConfig()
     
-    # Run pretraining
+
     trainer = Pretrainer(config)
     trainer.train(resume_from=args.resume)
 

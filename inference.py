@@ -1,163 +1,278 @@
 """
-Inference Script
-================
-Run inference with the trained model.
+Inference Script for Infinitely Scalable Recursive Model (ISRM)
+===============================================================
+
+Run inference with configurable number of loops for quality scaling.
+
+The key innovation: Quality scales MONOTONICALLY with compute!
+- --loops 1    : Fast but lower quality
+- --loops 8    : Good balance (default)
+- --loops 32   : High quality
+- --loops 100  : Best quality (more compute)
+- --loops 500  : Even better (if you have time)
 
 Usage:
-    python inference.py --model outputs/best_model.pt --prompt "What is 2+2?"
+    # Quick inference
+    python inference_scalable.py --model outputs_scalable/best_model.pt --prompt "Hello" --loops 8
+    
+    # High quality inference
+    python inference_scalable.py --model outputs_scalable/best_model.pt --prompt "Explain quantum computing" --loops 100
+    
+    # Interactive chat
+    python inference_scalable.py --model outputs_scalable/best_model.pt --chat --loops 32
+    
+    # Debug refinement process (analysis + generate N tokens with greedy refinement)
+    python inference_scalable.py --model outputs_scalable/best_model.pt --prompt "Hello" --debug-refinement 10
 """
 
 import argparse
 import sys
 from pathlib import Path
-from typing import Optional, Generator
+from typing import Optional, Generator, Dict, Any
 
 import torch
 import torch.nn.functional as F
 from transformers import AutoTokenizer
 
-from model import SmallLM, ModelConfig
-from train import TrainingConfig  # Needed to load checkpoint
+from model import InfinitelyScalableRecursiveModel, ScalableModelConfig
+
+# Import training config to enable checkpoint loading
+# Note: In the final unified structure, we should move ScalableTrainingConfig to model.py or config utils
+# For now, we'll try to import from train.py if needed, or handle it dynamically.
+try:
+    from train import ScalableTrainingConfig
+except ImportError:
+    ScalableTrainingConfig = None
 
 
-class InferenceEngine:
-    """Inference engine for the trained model."""
+class ScalableInferenceEngine:
+    """Inference engine for ISRM with configurable loops."""
     
-    # Special tokens
+
     IM_START = "<|im_start|>"
     IM_END = "<|im_end|>"
-    THINK_START = "<think>"
-    THINK_END = "</think>"
     
     def __init__(
         self,
         model_path: str,
         tokenizer_name: str = "Qwen/Qwen2.5-0.5B",
         device: Optional[str] = None,
+        default_loops: int = 8,
     ):
         self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
+        self.default_loops = default_loops
         
-        # Load tokenizer
+
         print(f"Loading tokenizer: {tokenizer_name}")
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, trust_remote_code=True)
         
-        # Add special tokens
-        special_tokens = [self.IM_START, self.IM_END, self.THINK_START, self.THINK_END]
+        special_tokens = [self.IM_START, self.IM_END]
         self.tokenizer.add_special_tokens({'additional_special_tokens': special_tokens})
         
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
         
-        # Load model
+
         print(f"Loading model: {model_path}")
         self.model = self._load_model(model_path)
         self.model.eval()
+        
+        print(f"Default inference loops: {default_loops}")
+        print(f"Device: {self.device}")
     
-    def _load_model(self, path: str) -> SmallLM:
-        """Load model from checkpoint."""
+    def _load_model(self, path: str) -> InfinitelyScalableRecursiveModel:
+        """Load ISRM from checkpoint."""
         checkpoint = torch.load(path, map_location=self.device, weights_only=False)
         
-        # Get config from checkpoint
         config_data = checkpoint.get('config')
         if config_data is None:
-            # Use defaults
-            model_config = ModelConfig(vocab_size=len(self.tokenizer))
+            model_config = ScalableModelConfig(vocab_size=len(self.tokenizer))
         else:
-            model_config = ModelConfig(
+
+            def get_val(obj, key, default):
+                if isinstance(obj, dict):
+                    return obj.get(key, default)
+                return getattr(obj, key, default)
+            
+            model_config = ScalableModelConfig(
                 vocab_size=len(self.tokenizer),
-                dim=getattr(config_data, 'dim', 512),
-                n_layers=getattr(config_data, 'n_layers', 12),
-                n_heads=getattr(config_data, 'n_heads', 8),
-                n_kv_heads=getattr(config_data, 'n_kv_heads', 2),
-                intermediate_size=getattr(config_data, 'intermediate_size', 1408),
-                max_seq_len=getattr(config_data, 'max_seq_len', 2048),
+                dim=get_val(config_data, 'dim', 256),
+                n_layers=get_val(config_data, 'n_layers', 2),
+                n_heads=get_val(config_data, 'n_heads', 4),
+                n_kv_heads=get_val(config_data, 'n_kv_heads', 2),
+                intermediate_size=get_val(config_data, 'intermediate_size', 512),
+                max_seq_len=get_val(config_data, 'max_seq_len', 1024),
+                train_k_min=get_val(config_data, 'train_k_min', 1),
+                train_k_max=get_val(config_data, 'train_k_max', 16),
+                default_k=get_val(config_data, 'default_k', 8),
+                n_latent_iter=get_val(config_data, 'n_latent_iter', 1),
+                max_step_embeddings=get_val(config_data, 'max_step_embeddings', 256),
             )
         
-        # Create model
-        model = SmallLM(model_config)
+        model = InfinitelyScalableRecursiveModel(model_config)
         
-        # Load state dict
-        model.load_state_dict(checkpoint['model_state_dict'])
+        state_dict = checkpoint['model_state_dict']
+        
+
+        if 'embed_tokens.weight' in state_dict:
+            current_vocab = model.embed_tokens.weight.shape[0]
+            loaded_vocab = state_dict['embed_tokens.weight'].shape[0]
+            if current_vocab != loaded_vocab:
+                print(f"Resizing embeddings: {loaded_vocab} -> {current_vocab}")
+                new_emb = model.embed_tokens.weight.data.clone()
+                min_vocab = min(current_vocab, loaded_vocab)
+                new_emb[:min_vocab] = state_dict['embed_tokens.weight'][:min_vocab]
+                state_dict['embed_tokens.weight'] = new_emb
+                if 'lm_head.weight' in state_dict:
+                    new_head = model.lm_head.weight.data.clone()
+                    new_head[:min_vocab] = state_dict['lm_head.weight'][:min_vocab]
+                    state_dict['lm_head.weight'] = new_head
+        
+        model.load_state_dict(state_dict)
         model = model.to(self.device)
+        
+        total_params = sum(p.numel() for p in model.parameters())
+        print(f"Model parameters: {total_params:,} ({total_params/1e6:.2f}M)")
         
         return model
     
     def format_prompt(self, user_input: str, system_prompt: Optional[str] = None) -> str:
-        """Format user input as a chat prompt."""
+        """Format as chat prompt."""
         parts = []
-        
         if system_prompt:
             parts.append(f"{self.IM_START}system\n{system_prompt}{self.IM_END}\n")
-        
         parts.append(f"{self.IM_START}user\n{user_input}{self.IM_END}\n")
         parts.append(f"{self.IM_START}assistant\n")
-        
         return ''.join(parts)
     
     def extract_response(self, full_text: str, prompt: str) -> str:
-        """Extract just the assistant response from generated text."""
-        # Remove the prompt
+        """Extract assistant response."""
         response = full_text[len(prompt):]
-        
-        # Remove trailing tokens
         if self.IM_END in response:
             response = response.split(self.IM_END)[0]
-        
         return response.strip()
     
-    def extract_thinking(self, response: str) -> tuple[str, str]:
-        """Extract thinking and final response from assistant output."""
-        if self.THINK_START in response and self.THINK_END in response:
-            start = response.find(self.THINK_START) + len(self.THINK_START)
-            end = response.find(self.THINK_END)
-            thinking = response[start:end].strip()
-            final = response[end + len(self.THINK_END):].strip()
-            return thinking, final
-        return "", response
+    @torch.no_grad()
+    def analyze_refinement(
+        self,
+        prompt: str,
+        max_loops: int = 64,
+        system_prompt: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Analyze how quality improves with more loops.
+        
+        This is useful for understanding the model's scaling behavior.
+        Returns metrics at each loop count INCLUDING actual CE loss.
+        """
+        formatted = self.format_prompt(prompt, system_prompt)
+        input_ids = self.tokenizer.encode(formatted, return_tensors='pt', add_special_tokens=False).to(self.device)
+        
+        bsz, seqlen = input_ids.shape
+        
+
+        labels = input_ids.clone()
+        
+        inputs = self.model.embed_tokens(input_ids)
+        outputs, latents = self.model.get_initial_states(bsz, seqlen, self.device)
+        
+        results = []
+        
+        for step in range(1, max_loops + 1):
+            outputs, latents, metrics = self.model.single_refinement_step(inputs, outputs, latents, step)
+            
+
+            all_logits = self.model.lm_head(outputs)
+            
+
+            shift_logits = all_logits[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous()
+            ce_loss = F.cross_entropy(
+                shift_logits.view(-1, shift_logits.size(-1)),
+                shift_labels.view(-1),
+                reduction='mean'
+            ).item()
+            
+
+            logits = all_logits[:, -1, :]
+            probs = F.softmax(logits, dim=-1)
+            
+            top_prob, top_idx = probs.max(dim=-1)
+            top_token = self.tokenizer.decode([top_idx.item()])
+            
+
+            entropy = -(probs * torch.log(probs + 1e-10)).sum(dim=-1).item()
+            
+
+            latent_alpha = metrics.get('latent_alpha', 0)
+            output_alpha = metrics.get('output_alpha', 0)
+            if hasattr(latent_alpha, 'item'):
+                latent_alpha = latent_alpha.item()
+            if hasattr(output_alpha, 'item'):
+                output_alpha = output_alpha.item()
+            
+            results.append({
+                'step': step,
+                'top_token': top_token,
+                'top_token_id': top_idx.item(),
+                'confidence': top_prob.item(),
+                'entropy': entropy,
+                'loss': ce_loss,
+                'latent_alpha': latent_alpha,
+                'output_alpha': output_alpha,
+            })
+        
+        return {
+            'prompt': prompt,
+            'refinement_steps': results,
+            'summary': {
+                'initial_entropy': results[0]['entropy'],
+                'final_entropy': results[-1]['entropy'],
+                'entropy_reduction': results[0]['entropy'] - results[-1]['entropy'],
+                'initial_confidence': results[0]['confidence'],
+                'final_confidence': results[-1]['confidence'],
+                'confidence_gain': results[-1]['confidence'] - results[0]['confidence'],
+                'initial_loss': results[0]['loss'],
+                'final_loss': results[-1]['loss'],
+                'loss_reduction': results[0]['loss'] - results[-1]['loss'],
+            }
+        }
     
     @torch.no_grad()
     def generate_stream(
         self,
         prompt: str,
         max_new_tokens: int = 512,
+        num_loops: int = None,
         temperature: float = 0.7,
         top_k: int = 50,
         top_p: float = 0.9,
         repetition_penalty: float = 1.2,
         system_prompt: Optional[str] = None,
     ) -> Generator[str, None, None]:
-        """Generate a response with streaming output.
+        """Generate with streaming output."""
+        if num_loops is None:
+            num_loops = self.default_loops
         
-        Yields:
-            Each token as it's generated.
-        """
-        # Format prompt
-        formatted_prompt = self.format_prompt(prompt, system_prompt)
-        
-        # Tokenize
-        input_ids = self.tokenizer.encode(
-            formatted_prompt,
-            return_tensors='pt',
-            add_special_tokens=False,
-        ).to(self.device)
+        formatted = self.format_prompt(prompt, system_prompt)
+        input_ids = self.tokenizer.encode(formatted, return_tensors='pt', add_special_tokens=False).to(self.device)
         
         eos_token_id = self.tokenizer.convert_tokens_to_ids(self.IM_END)
         
-        # Stream generation token by token
         for _ in range(max_new_tokens):
-            # Truncate if exceeding max length
             idx_cond = input_ids[:, -self.model.config.max_seq_len:]
+            bsz, seqlen = idx_cond.shape
             
-            # Forward pass with appropriate precision
-            if self.device.type == 'cuda':
-                with torch.amp.autocast('cuda', dtype=torch.bfloat16):
-                    logits, _ = self.model(idx_cond)
-            else:
-                logits, _ = self.model(idx_cond)
+
+            inputs = self.model.embed_tokens(idx_cond)
+            outputs, latents = self.model.get_initial_states(bsz, seqlen, self.device)
             
-            logits = logits[:, -1, :]
+
+            for step in range(1, num_loops + 1):
+                outputs, latents, _ = self.model.single_refinement_step(inputs, outputs, latents, step)
             
-            # Apply repetition penalty
+            logits = self.model.lm_head(outputs)[:, -1, :]
+            
+
             if repetition_penalty != 1.0:
                 for i in range(input_ids.size(0)):
                     for token_id in set(input_ids[i].tolist()):
@@ -166,15 +281,12 @@ class InferenceEngine:
                         else:
                             logits[i, token_id] *= repetition_penalty
             
-            # Apply temperature
             logits = logits / temperature
             
-            # Top-k filtering
             if top_k is not None:
                 v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
                 logits[logits < v[:, [-1]]] = float('-inf')
             
-            # Top-p (nucleus) filtering
             if top_p is not None:
                 sorted_logits, sorted_indices = torch.sort(logits, descending=True)
                 cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
@@ -184,17 +296,13 @@ class InferenceEngine:
                 indices_to_remove = sorted_indices_to_remove.scatter(1, sorted_indices, sorted_indices_to_remove)
                 logits[indices_to_remove] = float('-inf')
             
-            # Sample
             probs = F.softmax(logits, dim=-1)
             next_token = torch.multinomial(probs, num_samples=1)
             
-            # Append
             input_ids = torch.cat([input_ids, next_token], dim=1)
             
-            # Decode and yield the new token
             token_text = self.tokenizer.decode(next_token[0], skip_special_tokens=False)
             
-            # Check for end token
             if eos_token_id is not None and next_token.item() == eos_token_id:
                 break
             
@@ -205,46 +313,33 @@ class InferenceEngine:
         self,
         prompt: str,
         max_new_tokens: int = 512,
+        num_loops: int = None,
         temperature: float = 0.7,
         top_k: int = 50,
         top_p: float = 0.9,
         system_prompt: Optional[str] = None,
         stream: bool = False,
-    ) -> dict:
-        """Generate a response.
-        
-        Args:
-            stream: If True, returns a generator that yields tokens.
-        
-        Returns:
-            dict with 'thinking' and 'response' keys (or generator if streaming)
-        """
+    ) -> Dict[str, str]:
+        """Generate a response."""
         if stream:
             return self.generate_stream(
-                prompt,
-                max_new_tokens=max_new_tokens,
-                temperature=temperature,
-                top_k=top_k,
-                top_p=top_p,
-                system_prompt=system_prompt,
+                prompt, max_new_tokens, num_loops,
+                temperature, top_k, top_p,
+                system_prompt=system_prompt
             )
         
-        # Format prompt
-        formatted_prompt = self.format_prompt(prompt, system_prompt)
+        if num_loops is None:
+            num_loops = self.default_loops
         
-        # Tokenize
-        input_ids = self.tokenizer.encode(
-            formatted_prompt,
-            return_tensors='pt',
-            add_special_tokens=False,
-        ).to(self.device)
+        formatted = self.format_prompt(prompt, system_prompt)
+        input_ids = self.tokenizer.encode(formatted, return_tensors='pt', add_special_tokens=False).to(self.device)
         
-        # Generate
         if self.device.type == 'cuda':
             with torch.amp.autocast('cuda', dtype=torch.bfloat16):
                 output_ids = self.model.generate(
                     input_ids,
                     max_new_tokens=max_new_tokens,
+                    num_loops=num_loops,
                     temperature=temperature,
                     top_k=top_k,
                     top_p=top_p,
@@ -254,39 +349,64 @@ class InferenceEngine:
             output_ids = self.model.generate(
                 input_ids,
                 max_new_tokens=max_new_tokens,
+                num_loops=num_loops,
                 temperature=temperature,
                 top_k=top_k,
                 top_p=top_p,
                 eos_token_id=self.tokenizer.convert_tokens_to_ids(self.IM_END),
             )
         
-        # Decode
         full_text = self.tokenizer.decode(output_ids[0], skip_special_tokens=False)
+        response = self.extract_response(full_text, formatted)
         
-        # Extract response
-        response = self.extract_response(full_text, formatted_prompt)
-        thinking, final_response = self.extract_thinking(response)
-        
-        return {
-            'thinking': thinking,
-            'response': final_response,
-            'full_output': response,
-        }
+        return {'response': response, 'num_loops': num_loops}
+
+    @torch.no_grad()
+    def generate_debug_refinement(
+        self,
+        prompt: str,
+        max_new_tokens: int = 1,
+        num_loops: int = None,
+        system_prompt: Optional[str] = None,
+    ) -> str:
+        """Generate with greedy refinement for a fixed token budget."""
+        if num_loops is None:
+            num_loops = self.default_loops
+
+        formatted = self.format_prompt(prompt, system_prompt)
+        input_ids = self.tokenizer.encode(formatted, return_tensors='pt', add_special_tokens=False).to(self.device)
+        generated_tokens = []
+
+        for _ in range(max_new_tokens):
+            idx_cond = input_ids[:, -self.model.config.max_seq_len:]
+            bsz, seqlen = idx_cond.shape
+
+            inputs = self.model.embed_tokens(idx_cond)
+            outputs, latents = self.model.get_initial_states(bsz, seqlen, self.device)
+
+            for step in range(1, num_loops + 1):
+                outputs, latents, _ = self.model.single_refinement_step(inputs, outputs, latents, step)
+
+            logits = self.model.lm_head(outputs)[:, -1, :]
+            next_token = torch.argmax(logits, dim=-1, keepdim=True)
+            input_ids = torch.cat([input_ids, next_token], dim=1)
+            token_text = self.tokenizer.decode(next_token[0], skip_special_tokens=True)
+            generated_tokens.append(token_text)
+
+        return ''.join(generated_tokens).strip()
     
-    def chat(self, stream: bool = True):
-        """Interactive chat mode.
+    def chat(self, num_loops: int = None, stream: bool = True):
+        """Interactive chat mode."""
+        if num_loops is None:
+            num_loops = self.default_loops
         
-        Args:
-            stream: If True, stream tokens as they're generated.
-        """
         print("\n" + "="*60)
-        print("Interactive Chat Mode")
-        print("Type 'quit' to exit, 'clear' to clear history")
-        mode_str = "(streaming)" if stream else "(non-streaming)"
-        print(f"Mode: {mode_str}")
+        print("ISRM Interactive Chat - Infinitely Scalable Recursive Model")
+        print(f"Using {num_loops} refinement loops per token")
+        print("Type 'quit' to exit, 'loops N' to change loop count")
         print("="*60 + "\n")
         
-        system_prompt = "You are a helpful AI assistant. Think step by step before answering."
+        system_prompt = "You are a helpful AI assistant."
         
         while True:
             try:
@@ -302,82 +422,114 @@ class InferenceEngine:
                 print("Goodbye!")
                 break
             
-            if user_input.lower() == 'clear':
-                print("History cleared.")
-                continue
+            if user_input.lower().startswith('loops '):
+                try:
+                    new_loops = int(user_input.split()[1])
+                    num_loops = new_loops
+                    print(f"Now using {num_loops} refinement loops")
+                    continue
+                except:
+                    print("Usage: loops <number>")
+                    continue
             
             print("\nAssistant: ", end="", flush=True)
             
             if stream:
-                # Streaming mode - print tokens as they're generated
-                full_response = ""
-                for token in self.generate_stream(user_input, system_prompt=system_prompt):
+                for token in self.generate_stream(user_input, num_loops=num_loops, system_prompt=system_prompt):
                     print(token, end="", flush=True)
-                    full_response += token
-                print("\n")  # New line after response
+                print("\n")
             else:
-                # Non-streaming mode
-                result = self.generate(
-                    user_input,
-                    system_prompt=system_prompt,
-                )
-                
-                if result['thinking']:
-                    print(f"\n[Thinking]: {result['thinking'][:200]}...")
-                    print(f"\n{result['response']}\n")
-                else:
-                    print(f"{result['response']}\n")
+                result = self.generate(user_input, num_loops=num_loops, system_prompt=system_prompt)
+                print(f"{result['response']}\n")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Inference with trained model")
+    parser = argparse.ArgumentParser(description="Inference with ISRM - Infinitely Scalable Recursive Model")
     parser.add_argument('--model', type=str, required=True, help='Path to model checkpoint')
     parser.add_argument('--tokenizer', type=str, default='Qwen/Qwen2.5-0.5B', help='Tokenizer name')
     parser.add_argument('--prompt', type=str, default=None, help='Single prompt to process')
-    parser.add_argument('--chat', action='store_true', help='Enter interactive chat mode')
+    parser.add_argument('--chat', action='store_true', help='Interactive chat mode')
+    parser.add_argument('--loops', type=int, default=8, help='Number of refinement loops (quality scaling!)')
     parser.add_argument('--max-tokens', type=int, default=512, help='Max tokens to generate')
     parser.add_argument('--temperature', type=float, default=0.7, help='Sampling temperature')
     parser.add_argument('--top-k', type=int, default=50, help='Top-k sampling')
-    parser.add_argument('--top-p', type=float, default=0.9, help='Top-p (nucleus) sampling')
-    parser.add_argument('--cpu', nargs='?', const=0, type=int, default=None, 
-                        help='Force CPU usage. Optionally specify number of threads (e.g. --cpu 8)')
-    parser.add_argument('--stream', action='store_true', default=True,
-                        help='Enable streaming output (default: enabled)')
-    parser.add_argument('--no-stream', action='store_true',
-                        help='Disable streaming output')
+    parser.add_argument('--top-p', type=float, default=0.9, help='Top-p sampling')
+    parser.add_argument('--cpu', action='store_true', help='Force CPU')
+    parser.add_argument('--stream', action='store_true', default=True, help='Enable streaming')
+    parser.add_argument('--no-stream', action='store_true', help='Disable streaming')
+    parser.add_argument(
+        '--debug-refinement',
+        type=int,
+        nargs='?',
+        const=1,
+        default=0,
+        metavar='N',
+        help='Debug refinement: show loop analysis with N-token outputs per step (default N=1)',
+    )
     args = parser.parse_args()
     
-    # Configure CPU threads if requested
-    device_name = None
-    if args.cpu is not None:
-        device_name = "cpu"
-        if args.cpu > 0:
-            torch.set_num_threads(args.cpu)
-            print(f"Setting CPU threads to {args.cpu}")
-        else:
-            print(f"Running on CPU with default threads ({torch.get_num_threads()})")
+    device = "cpu" if args.cpu else None
     
-    # Create inference engine
-    engine = InferenceEngine(
+    engine = ScalableInferenceEngine(
         model_path=args.model,
         tokenizer_name=args.tokenizer,
-        device=device_name,
+        device=device,
+        default_loops=args.loops,
     )
     
-    # Determine streaming mode
     use_stream = args.stream and not args.no_stream
     
-    if args.chat:
-        engine.chat(stream=use_stream)
+    if args.debug_refinement and args.prompt:
+        print("\n" + "="*70)
+        print("Refinement Analysis (ISRM)")
+        print("="*70)
+
+        print(f"\nPrompt: {args.prompt}\n")
+
+        max_loops = args.loops
+        analysis = engine.analyze_refinement(args.prompt, max_loops=max_loops)
+
+        print("Step |   Loss   | Entropy | Confid | Output")
+        print("-" * 70)
+
+        for r in analysis['refinement_steps']:
+            sample = engine.generate_debug_refinement(
+                args.prompt,
+                max_new_tokens=args.debug_refinement,
+                num_loops=r['step'],
+            )
+            print(f"{r['step']:4d} | {r['loss']:8.4f} | {r['entropy']:7.4f} | {r['confidence']:.4f} | {sample}")
+
+        print("\nSummary:")
+        print(f"  Loss reduction: {analysis['summary']['loss_reduction']:.4f} ({analysis['summary']['initial_loss']:.4f} -> {analysis['summary']['final_loss']:.4f})")
+        print(f"  Entropy reduction: {analysis['summary']['entropy_reduction']:.4f}")
+        print(f"  Confidence gain: {analysis['summary']['confidence_gain']:.4f}")
+        
+
+        losses = [r['loss'] for r in analysis['refinement_steps']]
+        is_monotonic = all(losses[i] >= losses[i+1] - 0.01 for i in range(len(losses)-1))
+        if is_monotonic:
+            print("  ✓ Loss MONOTONICALLY DECREASING - TRUE ISRM!")
+        else:
+            degradations = sum(1 for i in range(len(losses)-1) if losses[i+1] > losses[i] + 0.01)
+            print(f"  ✗ Loss degraded {degradations} times")
+
+        print("="*70)
+        
+    elif args.chat:
+        engine.chat(num_loops=args.loops, stream=use_stream)
+        
     elif args.prompt:
         print("\n" + "="*60)
+        print(f"Generating with {args.loops} refinement loops...")
+        print("="*60)
         
         if use_stream:
-            # Streaming mode
-            print("[Response]:")
+            print("\n[Response]:")
             for token in engine.generate_stream(
                 args.prompt,
                 max_new_tokens=args.max_tokens,
+                num_loops=args.loops,
                 temperature=args.temperature,
                 top_k=args.top_k,
                 top_p=args.top_p,
@@ -385,18 +537,15 @@ def main():
                 print(token, end="", flush=True)
             print("\n" + "="*60)
         else:
-            # Non-streaming mode
             result = engine.generate(
                 args.prompt,
                 max_new_tokens=args.max_tokens,
+                num_loops=args.loops,
                 temperature=args.temperature,
                 top_k=args.top_k,
                 top_p=args.top_p,
             )
-            
-            if result['thinking']:
-                print(f"[Thinking]:\n{result['thinking']}\n")
-            print(f"[Response]:\n{result['response']}")
+            print(f"\n[Response]:\n{result['response']}")
             print("="*60)
     else:
         print("Please provide --prompt or use --chat mode")

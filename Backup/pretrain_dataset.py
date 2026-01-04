@@ -21,7 +21,7 @@ import numpy as np
 class PretrainConfig:
     """Configuration for pretraining dataset."""
     dataset_name: str = "HuggingFaceFW/fineweb-edu"
-    dataset_config: str = "sample-100BT"  # 100B tokens, ~270GB
+    dataset_config: str = "sample-100BT"
     max_length: int = 1024
     cache_dir: str = "./pretrain_cache"
     tokenizer_name: str = "Qwen/Qwen2.5-0.5B"
@@ -48,7 +48,7 @@ class StreamingPretrainDataset(IterableDataset):
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         
-        # Load tokenizer
+
         print(f"Loading tokenizer: {tokenizer_name}")
         self.tokenizer = AutoTokenizer.from_pretrained(
             tokenizer_name,
@@ -69,7 +69,7 @@ class StreamingPretrainDataset(IterableDataset):
         print(f"Streaming from: {self.dataset_name} ({self.dataset_config})")
         
         max_retries = 10
-        base_delay = 5  # seconds
+        base_delay = 5
         
         for attempt in range(max_retries):
             try:
@@ -101,29 +101,29 @@ class StreamingPretrainDataset(IterableDataset):
         eos_id = self.tokenizer.eos_token_id
         
         for doc in stream:
-            # Get text from the document
+
             text = doc.get("text", "")
             if not text or len(text.strip()) < 50:
                 continue
             
-            # Tokenize
+
             tokens = self.tokenizer.encode(text, add_special_tokens=False)
             
-            # Add EOS at document boundary
+
             tokens.append(eos_id)
             
-            # Add to buffer
+
             buffer.extend(tokens)
             
-            # Yield complete sequences when we have enough
+
             while len(buffer) >= self.max_length:
                 seq = buffer[:self.max_length]
                 buffer = buffer[self.max_length:]
                 
                 input_ids = torch.tensor(seq, dtype=torch.long)
-                # For pretraining, labels = input_ids shifted (next token prediction)
+
                 labels = input_ids.clone()
-                # No masking needed - train on all tokens
+
                 label_mask = torch.ones(self.max_length, dtype=torch.float)
                 
                 yield {
@@ -154,7 +154,7 @@ class ShuffledPretrainDataset(IterableDataset):
         self.buffer_size = buffer_size
         self.seed = seed
         
-        # Pass through attributes
+
         self.tokenizer = base_dataset.tokenizer
         self.vocab_size = base_dataset.vocab_size
         self.max_length = base_dataset.max_length
@@ -167,19 +167,19 @@ class ShuffledPretrainDataset(IterableDataset):
         buffer = []
         base_iter = iter(self.base_dataset)
         
-        # Fill buffer
+
         for item in base_iter:
             buffer.append(item)
             if len(buffer) >= self.buffer_size:
                 break
         
-        # Yield with shuffling
+
         for item in base_iter:
             idx = rng.randint(0, len(buffer) - 1)
             yield buffer[idx]
             buffer[idx] = item
         
-        # Drain remaining buffer
+
         rng.shuffle(buffer)
         for item in buffer:
             yield item
@@ -211,7 +211,7 @@ def create_pretrain_dataloader(
         dataloader: Streaming DataLoader
         tokenizer: The tokenizer (for model vocab size)
     """
-    # Create base streaming dataset
+
     base_ds = StreamingPretrainDataset(
         dataset_name=dataset_name,
         dataset_config=dataset_config,
@@ -220,13 +220,13 @@ def create_pretrain_dataloader(
         cache_dir=cache_dir,
     )
     
-    # Wrap with shuffle buffer
+
     dataset = ShuffledPretrainDataset(
         base_dataset=base_ds,
         buffer_size=shuffle_buffer,
     )
     
-    # Create dataloader
+
     dataloader = DataLoader(
         dataset,
         batch_size=batch_size,
@@ -275,15 +275,15 @@ def estimate_tokens(
     
     avg_tokens_per_doc = total_tokens / doc_count if doc_count > 0 else 0
     
-    # Estimate based on config name
+
     if "100BT" in dataset_config:
-        estimated_total = 100_000_000_000  # 100B
+        estimated_total = 100_000_000_000
     elif "10BT" in dataset_config:
-        estimated_total = 10_000_000_000   # 10B
+        estimated_total = 10_000_000_000
     elif "350BT" in dataset_config:
-        estimated_total = 350_000_000_000  # 350B
+        estimated_total = 350_000_000_000
     else:
-        estimated_total = avg_tokens_per_doc * 1000000  # Rough guess
+        estimated_total = avg_tokens_per_doc * 1000000
     
     return {
         "sample_tokens": total_tokens,
@@ -295,13 +295,13 @@ def estimate_tokens(
 
 
 if __name__ == "__main__":
-    # Test the streaming dataset
+
     print("Testing StreamingPretrainDataset...")
     
-    # Use the smallest sample for testing
+
     ds = StreamingPretrainDataset(
         dataset_name="HuggingFaceFW/fineweb-edu",
-        dataset_config="sample-10BT",  # Smallest sample for testing
+        dataset_config="sample-10BT",
         max_length=512,
     )
     

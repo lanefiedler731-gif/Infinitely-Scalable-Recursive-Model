@@ -1,0 +1,28 @@
+# Core PyTorch with FP8 support
+torch>=2.5.0
+torchvision
+torchaudio
+
+# Hugging Face
+datasets>=2.15.0
+transformers>=4.38.0
+tokenizers>=0.15.0
+accelerate>=0.25.0
+huggingface-hub>=0.20.0
+
+# Training utilities
+tqdm>=4.65.0
+wandb>=0.16.0
+
+# Data processing
+pyarrow>=14.0.0
+pandas>=2.0.0
+numpy>=1.24.0
+
+# FP8 Training (NVIDIA Transformer Engine for Blackwell)
+# transformer-engine>=1.4.0  # Install separately with CUDA 12.8+
+
+# Utilities
+pyyaml>=6.0
+rich>=13.0.0
+fire>=0.5.0
